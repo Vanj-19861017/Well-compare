@@ -1,0 +1,39 @@
+# 定义多组替换映射（每组旧ID列表 -> 对应的新ID）
+replace_groups = [
+    # # 第一组 锦州
+    # {
+    #     'old_ids': ['OmLoEbtR6S', 'QuTvYTm6Sg', 'bLGFbIaiBR', 'WMgQ1JJLKY', 'uqxf7sqJmY', 'syfKif6RWH', 'T91bXvACWs'],
+    #     'new_id': 'WdtrhAYXSS'
+    # },
+    # # 第二组 旅大
+    # {
+    #     'old_ids': ['wCpmPfokEn','USHATNsokC','qRlU1CU1Nt','GP0BzulAPV','GTcFhNYPAJ','yjt2T9geVq','UPaHTJwaZI','lS81T3rPaF','BHuBI7IX0w','Lldhd8Jg1u'],
+    #     'new_id': 'KPVPJ2aXUA'
+    # },
+    # # 第三组 秦皇岛
+    # {
+    #     'old_ids': ['mzzNsMYyaN','Scp3iJHi2S','l0sTQSYzo2','XNiB8aqgQN'],
+    #     'new_id': 'QrzR7ptwM5'
+    # },
+    # # 第四组 渤西
+    # {
+    #     'old_ids': ['oehgVR9pjd','vif4ny6rl8','ecj1ETHvY6','TmlRjsqbiX','onr3jDFxKm','TrvGxvmbUW','1JpgUdkMr0','YZtcgWP5be','qMin0ZIe6m','mr9ZkL380E','0DlN1me1Or','LCEZX1WoyN'],
+    #     'new_id': 'GeySVsLtXG'
+    # },
+    # # 第五组 CB换曹妃甸
+    # {
+    #     'old_ids': ['ZP1ORS2rEd'],
+    #     'new_id': 'MO8HqH7iVE'
+    # },
+    # 第五组(公司) 
+    {
+        'old_ids': ['PRDPL00000','rNJS0Mx2vV','gSyBMQKdDt'],
+        'new_id': '12345Mx2vV'
+    }
+    # ,
+    # 第六组 垦利
+    # {
+    #     'old_ids': ['u5NWnTU1Hx','voPxpnJl6I','cHQN16FPOK','DvPJY6xtwz','7DH6yu3oKc','QAdHHZiJaP','4Am9KgOKdT','82KWLJiQ7c','wGxxvUbMw5','wm3E8ogt5x','3xx53S7THN','CFFwvKQSNu','zDN9E3sE8M','yOrncDB6Lw','a6RAQj51iu','greNF1z01L','BhaTsO3xVL'],
+    #     'new_id': '8jL7xbsFin'
+    # }
+]
