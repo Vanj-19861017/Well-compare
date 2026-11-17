@@ -14,6 +14,8 @@
 统一 import / 统一主题 (clam) / 统一顶层 Banner, 各 tab 内部保持原有逻辑不变.
 """
 
+import html
+import json
 import math
 import os
 import re
@@ -102,8 +104,25 @@ class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("定向井设计工具箱")
-        self.geometry("1280x760")
-        self.minsize(1080, 600)
+        # 居中 + 主屏幕2/3大小
+        # 用 ctypes 取主显示器真实分辨率（多显示器下 winfo_screenwidth 会返回虚拟桌面总宽度）
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            sw = user32.GetSystemMetrics(0)   # SM_CXSCREEN — 主显示器宽
+            sh = user32.GetSystemMetrics(1)   # SM_CYSCREEN — 主显示器高
+        except Exception:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+        w = max(int(sw / 1.5), 1280)
+        h = max(int(sh / 1.5), 800)
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(1280, 800)
+        # 下一帧再居中一次（闭包捕获本次 sw/sh，不再调 winfo_screen* 防重犯）
+        self.after(100, lambda _sw=sw, _sh=sh, _w=w, _h=h: self.geometry(
+            f"{_w}x{_h}+{(_sw-_w)//2}+{(_sh-_h)//2}"))
         try:                                    # 窗口图标 (打包后从 _MEIPASS 取)
             self.iconbitmap(resource_path("wj.ico"))
         except Exception:
@@ -3335,6 +3354,11 @@ XML_TARGET_REF_TAGS = (
 XML_REPLACE_GROUPS = [
     {'old_ids': ['PRDPL00000', 'rNJS0Mx2vV', 'gSyBMQKdDt'], 'new_id': '12345Mx2vV'}
 ]
+# 测量工具ID：survey_tool_id 属性内精确替换（不全局替换，避免误伤）
+XML_SURVEY_TOOL_REPLACE_GROUPS = [
+    {'old_ids': ['8b4PS', 'HdWb7', 'CU5bO'], 'new_id': 'mDBG5'},
+    {'old_ids': ['vLU3w', 'Av6LZ', 'eUZtM'], 'new_id': 'TKHg1'}
+]
 
 # 表头（固定，不随源文件）
 XML_HEADER = (
@@ -3375,11 +3399,22 @@ def xml_replace_ids(content, groups=XML_REPLACE_GROUPS):
     return content
 
 
+def xml_replace_survey_tool_ids(content, groups=XML_SURVEY_TOOL_REPLACE_GROUPS):
+    """survey_tool_id 属性值精确替换（仅改属性值，避免误伤正文中的其他片段）"""
+    for group in groups:
+        old_ids_pattern = '|'.join(group['old_ids'])
+        content = re.sub(rf'survey_tool_id=(["\'])({old_ids_pattern})\1',
+                         rf'survey_tool_id=\1{group["new_id"]}\1', content)
+    return content
+
+
 def xml_read_lines(path):
-    """读取文件并先做改ID，返回行列表（兼容BOM）"""
+    """读取文件并先做改ID（全局ID + survey_tool_id属性值），返回行列表（兼容BOM）"""
     with open(path, 'r', encoding='utf-8-sig', errors='replace') as f:
         content = f.read()
-    return xml_replace_ids(content).splitlines()
+    content = xml_replace_ids(content)
+    content = xml_replace_survey_tool_ids(content)
+    return content.splitlines()
 
 
 def xml_split_ending(lines):
@@ -3463,6 +3498,55 @@ def xml_build_always_update(target_lines):
     return block
 
 
+def xml_add_dp_template_updates(lines):
+    """为每个被 CD_WELL.slot_name 匹配到的 DP_TEMPLATE 行，在其下方追加两条 update execsql：
+      1. 把 DB 里 short_name 已经是该井槽名的行改名为 '<井槽名>_old'（腾出槽位名）；
+      2. 把该模板行对应的 (site_id, template_id) 的 short_name / template_name 写成井槽名，
+         并把该模板行的 template_north / template_east 一并写入（行上没有该属性则不写）。
+    匹配口径：同 site_id 下 DP_TEMPLATE.short_name（缺省回退 slot_name）== CD_WELL.slot_name。"""
+    well_slots = set()
+    for line in lines:
+        if line.strip().startswith('<CD_WELL'):
+            sid = xml_get_attr_loose(line, 'site_id')
+            slot = html.unescape(xml_get_attr_loose(line, 'slot_name') or '').strip()
+            if sid and slot:
+                well_slots.add((sid, slot))
+    if not well_slots:
+        return list(lines)
+    renamed = set()
+    out = []
+    for line in lines:
+        out.append(line)
+        if not line.strip().startswith('<DP_TEMPLATE'):
+            continue
+        sid = xml_get_attr_loose(line, 'site_id')
+        tid = xml_get_attr_loose(line, 'template_id')
+        short_nm = html.unescape(
+            xml_get_attr_loose(line, 'short_name') or xml_get_attr_loose(line, 'slot_name') or ''
+        ).strip()
+        if sid and tid and (sid, short_nm) in well_slots:
+            slot_sql = short_nm.replace("'", "''")
+            if short_nm not in renamed:
+                renamed.add(short_nm)
+                out.append(
+                    '<execsql command="update dp_template set '
+                    f"short_name='{slot_sql}_old', template_name='{slot_sql}_old' "
+                    f"from dp_template where short_name='{slot_sql}'\"/>"
+                )
+            # SET 子句：井槽名 + 该模板行自带的 template_north / template_east（存在才写）
+            sets = [f"short_name='{slot_sql}'", f"template_name='{slot_sql}'"]
+            for col in ('template_north', 'template_east'):
+                val = (xml_get_attr_loose(line, col) or '').strip()
+                if val:
+                    sets.append(f"{col}='{val.replace(chr(39), chr(39) * 2)}'")
+            out.append(
+                '<execsql command="update dp_template set '
+                + ', '.join(sets)
+                + f" from dp_template dp where dp.site_id='{sid}' and dp.template_id='{tid}'\"/>"
+            )
+    return out
+
+
 def xml_list_source_files(folder, exclude_prefix='全设计'):
     """列出文件夹内的 .edm.xml（排除生成的结果文件），按名称自然排序"""
     names = [
@@ -3502,6 +3586,7 @@ def xml_merge_folder(folder, out_prefix='全设计'):
     if ending is None:
         ending = list(XML_DEFAULT_ENDING)
 
+    kept = xml_add_dp_template_updates(kept)
     output = list(header) + kept
     if ending[0].strip().startswith('</ALWAYS-UPDATE>'):
         output.append('<ALWAYS-UPDATE>')
@@ -3606,6 +3691,45 @@ def xml_replace_expand_point(content):
     return content.replace('expandPoint=CD_SITE', 'expandPoint=CD_WELL'), count
 
 
+def xml_extract_project_target_ids(content):
+    """提取 CD_SURVEY_STATION 行中实际引用过的 project_target_id 集合
+    （这些才是有效靶点，DP_PROJECT_TARGET 和 LINKTABLE 只保留被引用的）"""
+    return set(re.findall(r'<CD_SURVEY_STATION[^>]*project_target_id=(["\'])([^"\']+)\1', content))
+
+
+def xml_remove_invalid_dp_project_target(content, valid_ids):
+    """删除 DP_PROJECT_TARGET 中 project_target_id 不在 valid_ids 里的行（含 CD_PROJECT_TARGET 别名），
+    返回(新内容, 删除数)"""
+    def keep(line):
+        stripped = line.strip()
+        if stripped.startswith('<DP_PROJECT_TARGET') or stripped.startswith('<CD_PROJECT_TARGET'):
+            tid = xml_get_attr_loose(line, 'project_target_id')
+            return tid is None or tid in valid_ids
+        return True
+    lines = content.split('\n')
+    kept = [l for l in lines if keep(l)]
+    return '\n'.join(kept), len(lines) - len(kept)
+
+
+def xml_remove_invalid_links_after_linktable(content, valid_ids):
+    """删除 <LINKTABLE> 之后 project_target_id 不在 valid_ids 的所有行（含 ALWAY-UPDATE 里的靶点行、
+    以及 LINKTABLE 内部被引用的其他表行），返回(新内容, 删除数)"""
+    lines = content.split('\n')
+    idx = next((i for i, l in enumerate(lines) if '<LINKTABLE>' in l.strip()), -1)
+    if idx == -1:
+        return content, 0
+    kept = []
+    deleted = 0
+    for i, line in enumerate(lines):
+        if i > idx and 'project_target_id' in line:
+            tid = xml_get_attr_loose(line, 'project_target_id')
+            if tid and tid not in valid_ids:
+                deleted += 1
+                continue
+        kept.append(line)
+    return '\n'.join(kept), deleted
+
+
 def xml_extract_well_common_names(content):
     """提取<CD_WELL行中 well_id -> well_common_name"""
     names = {}
@@ -3642,17 +3766,23 @@ def xml_kept_wells_info(content, well_ids, cutoff):
 
 
 def xml_sanitize_filename(name):
-    """替换Windows文件名非法字符（/ 替换为 &）"""
-    cleaned = re.sub(r'[\\/:*?"<>|]', lambda m: '&' if m.group(0) == '/' else '_', name).strip()
+    """替换Windows文件名非法字符（/ 替换为 &）。
+    井名来自 XML 属性值，可能含 &#xFF0C; &quot; 等实体，先反转义再处理"""
+    unescaped = html.unescape(name)
+    cleaned = re.sub(r'[\\/:*?"<>|]', lambda m: '&' if m.group(0) == '/' else '_', unescaped).strip()
     return cleaned or 'unnamed'
 
 
 # ---------- 实钻井开钻记录（按年累计，井名去重） ----------
 def xml_extract_scope_names(content):
-    """提取 油田名、site_id->平台名、well_id->site_id"""
+    """提取 油田名、site_id->平台名、well_id->site_id、well_id->井槽名(slot_name)、
+    site_id->平台id(site_id本体)、site_id->槽口id(template_id，来自DP_TEMPLATE)"""
     project_name = ''
     site_names = {}
     well_sites = {}
+    well_slots = {}
+    site_sites = {}             # site_name -> site_id
+    site_tmpl_by_sid = {}       # site_id -> template_id (临时，循环后归并)
     for line in content.split('\n'):
         s = line.strip()
         if not project_name and s.startswith('<CD_PROJECT'):
@@ -3662,12 +3792,29 @@ def xml_extract_scope_names(content):
             nm = xml_get_attr_loose(line, 'site_name')
             if sid and nm:
                 site_names[sid] = nm
+                site_sites[nm] = sid
         elif s.startswith('<CD_WELL'):
             wid = xml_get_attr_loose(line, 'well_id')
             sid = xml_get_attr_loose(line, 'site_id')
+            slot = xml_get_attr_loose(line, 'slot_name') or ''
+            slot = html.unescape(slot)
             if wid and sid:
                 well_sites[wid] = sid
-    return project_name, site_names, well_sites
+            if wid and slot:
+                well_slots[wid] = slot
+        elif s.startswith('<DP_TEMPLATE'):
+            tmpl = xml_get_attr_loose(line, 'template_id')
+            sid = xml_get_attr_loose(line, 'site_id')
+            if tmpl and sid:
+                site_tmpl_by_sid[sid] = tmpl
+    # site_name -> template_id（site_id 可能在 DP_TEMPLATE 之后才出现，循环后归并）
+    site_template_ids = {
+        site_names[sid]: tmpl
+        for sid, tmpl in site_tmpl_by_sid.items()
+        if sid in site_names
+    }
+    site_ids = {nm: sid for sid, nm in site_names.items()}
+    return project_name, site_names, well_sites, well_slots, site_ids, site_template_ids
 
 
 SPUD_RECORD_HEADER = '序列号\t油田名\t平台名\t井名\t井id\twellborename\t开钻日期'
@@ -3703,74 +3850,185 @@ def xml_extract_wellbore_names(content):
 
 
 def xml_update_spud_record(content, well_ids, cutoff, record_dir=None):
-    """把本次保留的实钻井写入按年划分的累计记录（实钻井记录_YYYY.txt，在脚本目录）。
-    各年文件合并后按井名去重（同名只保留开钻日期最新的一口），重写并按年排序编号。
-    返回 (更新的文件列表, 本次记录的井数)。无有效日期的井不记录。"""
+    """把本次保留的实钻井写入按年划分的累计记录（实钻井记录_YYYY.json，在脚本目录）。
+    JSON 叠加不覆盖：读取已有记录 → 本次新增 → 去重 → 序号续接 → 写回。
+    返回 (更新的文件列表, 本次新增井数)。无有效日期的井不记录。"""
     if record_dir is None:
         record_dir = os.path.dirname(os.path.abspath(__file__))
-    project_name, site_names, well_sites = xml_extract_scope_names(content)
+    scope = xml_extract_scope_names(content)
+    project_name, site_names, well_sites, well_slots, site_ids, site_template_ids = scope
     names = xml_extract_well_common_names(content)
     dates = xml_extract_actual_survey_create_dates(content, cutoff)
     wb_info = xml_extract_actual_wellbores(content, cutoff)
     wb_names = xml_extract_wellbore_names(content)
 
-    # 全部记录：井名 -> [日期, 油田, 平台, 井id, wellborename]（先旧后新，同日期新的覆盖旧的）
-    merged = {}
-    pattern = os.path.join(record_dir, '实钻井记录_????.txt')
-    for path in glob.glob(pattern):
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.rstrip('\n').split('\t')
-                if len(parts) < 6 or parts[0] == '序列号':
-                    continue
-                _no, proj, site, wname, wid = parts[0], parts[1], parts[2], parts[3], parts[4]
-                if len(parts) >= 7:      # 新格式：含 wellborename
-                    wbname, dstr = parts[5], parts[6]
-                else:                    # 旧格式：无 wellborename
-                    wbname, dstr = '', parts[5]
-                try:
-                    d = datetime.date.fromisoformat(dstr)
-                except ValueError:
-                    continue
-                if wname:
-                    merged[wname] = [d, proj, site, wid, wbname]
-
+    # 新记录：井名+平台名 作唯一键（跨平台同名井分开）
+    new_entries = []
     new_count = 0
     for well_id in sorted(well_ids):
         d = dates.get(well_id)
         if not d:
             continue
         wname = names.get(well_id) or well_id
-        site = site_names.get(well_sites.get(well_id, ''), '')
+        sid = well_sites.get(well_id, '')
+        site_name = site_names.get(sid, '')
+        slot_name = well_slots.get(well_id, '')
         wbid = wb_info.get(well_id, (None, ''))[1]
         wbname = wb_names.get(wbid, wbid)
-        old = merged.get(wname)
-        if old is None or d >= old[0]:
-            merged[wname] = [d, project_name, site, well_id, wbname]
+        # 该平台的 site_id / template_id（同一平台所有井共用）
+        plat_site_id = site_ids.get(site_name, '')
+        plat_template_id = site_template_ids.get(site_name, '')
+        new_entries.append({
+            '油田名': project_name,
+            '平台名': site_name,
+            '平台id': plat_site_id,
+            '槽口id': plat_template_id,
+            '井名': wname,
+            '井槽名': slot_name,
+            '井id': well_id,
+            'wellbore_id': wbid,
+            'wellbore_name': wbname,
+            '开钻日期': d.isoformat(),
+        })
         new_count += 1
 
-    # 按年分组重写
-    by_year = {}
-    for wname, (d, proj, site, wid, wbname) in merged.items():
-        by_year.setdefault(d.year, []).append((d, wname, proj, site, wid, wbname))
+    # 按年分桶
+    from collections import defaultdict
+    by_year_new = defaultdict(list)
+    for e in new_entries:
+        try:
+            y = datetime.date.fromisoformat(e['开钻日期']).year
+        except ValueError:
+            continue
+        by_year_new[y].append(e)
 
     updated = []
-    for year, rows in sorted(by_year.items()):
-        rows.sort(key=lambda r: (r[0], r[1]))
-        path = os.path.join(record_dir, f'实钻井记录_{year}.txt')
+    for year, new_rows in by_year_new.items():
+        path = os.path.join(record_dir, f'实钻井记录_{year}.json')
+        txt_path = os.path.join(record_dir, f'实钻井记录_{year}.txt')
+        # 读取已有记录（优先 json，兼容旧 txt）
+        existing = []
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                existing = data.get('records', [])
+            except Exception:
+                existing = []
+        elif os.path.isfile(txt_path):
+            # 迁移同名旧 txt
+            existing = _migrate_txt_to_json(txt_path)
+
+        # 去重键：(平台名, 井名)
+        seen = {(r.get('平台名', ''), r.get('井名', '')) for r in existing}
+        for r in new_rows:
+            key = (r['平台名'], r['井名'])
+            if key in seen:
+                continue
+            seen.add(key)
+            existing.append(r)
+
+        # 排序（先日期后井名） + 序号续接
+        def _date_of(r):
+            try:
+                return datetime.date.fromisoformat(r.get('开钻日期', ''))
+            except ValueError:
+                return datetime.date.min
+        existing.sort(key=lambda r: (_date_of(r), r.get('井名', '')))
+        for i, r in enumerate(existing, 1):
+            r['序号'] = i
+
+        # 写回 json
+        data_out = {'year': year, 'records': existing}
         with open(path, 'w', encoding='utf-8') as f:
-            f.write(SPUD_RECORD_HEADER + '\n')
-            for i, (d, wname, proj, site, wid, wbname) in enumerate(rows, 1):
-                f.write(f'{i}\t{proj}\t{site}\t{wname}\t{wid}\t{wbname}\t{d.isoformat()}\n')
+            json.dump(data_out, f, ensure_ascii=False, indent=2)
+
+        # 迁移完 txt 删掉
+        if os.path.isfile(txt_path):
+            try:
+                os.remove(txt_path)
+            except OSError:
+                pass
         updated.append(path)
     return updated, new_count
 
 
+def _migrate_txt_to_json(txt_path):
+    """旧 txt 格式迁移到 json（字段对齐 + 缺失字段补空）"""
+    existing = []
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) < 6 or parts[0] == '序列号':
+                    continue
+                _no, proj, site, wname, wid = parts[0], parts[1], parts[2], parts[3], parts[4]
+                wbname, dstr = (parts[5], parts[6]) if len(parts) >= 7 else ('', parts[5])
+                existing.append({
+                    '油田名': proj,
+                    '平台名': site,
+                    '平台id': '',
+                    '槽口id': '',
+                    '井名': wname,
+                    '井槽名': '',
+                    '井id': wid,
+                    'wellbore_id': '',
+                    'wellbore_name': wbname,
+                    '开钻日期': dstr,
+                })
+    except OSError:
+        pass
+    return existing
 
+
+
+
+
+def xml_parameterize_single_well_execsql(lines, well_id):
+    """把平台级 <execsql> 删除语句参数化为单井级：
+    在所有 locator like pattern 的 site_id 之后插入 `+well_id=(well_id)`，
+    让 CD_POLYLINE_HEADER / CD_CHANGE_HISTORY_JOURNAL / CD_EXPLORER_FOLDER 的
+    删除范围精确到当前井，避免部署时误删同平台其他井的数据。"""
+    out = []
+    for line in lines:
+        if '<execsql command="delete from CD_' not in line:
+            out.append(line)
+            continue
+        # 在 `site_id=(xxx)` 之后、like pattern 结尾的 `%'` 或 `%"` 之前插入 `+well_id=(well_id)`
+        # 若已有 well_id 片段则替换值，保留片段位置
+        new_line = re.sub(
+            r'(site_id=\([^)]+\))(\+well_id=\([^)]+\))?(%[\'"])',
+            lambda m: f'{m.group(1)}+well_id=({well_id}){m.group(3)}',
+            line,
+        )
+        out.append(new_line)
+    return out
+
+
+def _xml_set_attr(line, name, value):
+    """在 XML 行里设置属性值。若属性已存在则替换值，不存在则在 > 前插入。"""
+    if re.search(rf'{name}=(["\']).*?\1', line):
+        line = re.sub(
+            rf'({name}=)(["\']).*?\2',
+            lambda m: f'{m.group(1)}"{value}"',
+            line, count=1)
+    else:
+        if line.rstrip().endswith('/>'):
+            line = line.rstrip()[:-2] + f' {name}="{value}" />'
+        else:
+            line = re.sub(r'(<\w+[^>]*?)(\s*/?>)', rf'\1 {name}="{value}"\2', line, count=1)
+    return line
 
 
 def xml_split_single_well_files(output_path, content, well_ids):
-    """把多井XML按井拆分为单井文件，文件名 = 平台名-well_common_name.edm.xml"""
+    """把多井XML按井拆分为单井文件，文件名 = 平台名-well_common_name.edm.xml
+    tail 里的 <ALWAYS-UPDATE> 块含平台级 execsql 删除语句，此处对每个井参数化注入 well_id，
+    避免部署时误删同平台其他井的 POLYLINE / CHANGE_HISTORY / EXPLORER_FOLDER。"""
+    # 必须原样保留的平台/项目级标签（无 well_id，所有井共享）
+    SHARED_PREFIXES = (
+        '<DP_TEMPLATE', '<CD_PROJECT', '<CD_SITE', '<CD_POLICY',
+        '<CD_DATUM', '<CD_COORDINATE_REFERENCE',
+    )
     lines = content.split('\n')
     start = next((i for i, l in enumerate(lines) if l.strip().startswith('<DP_TEMPLATE')), None)
     end = next((i for i, l in enumerate(lines) if '<ALWAYS-UPDATE>' in l), None)
@@ -3780,34 +4038,69 @@ def xml_split_single_well_files(output_path, content, well_ids):
     region = lines[start:end]
     tail = lines[end:]
     names = xml_extract_well_common_names(content)
-    _project_name, site_names, well_sites = xml_extract_scope_names(content)
+    _project_name, site_names, well_sites, *_ = xml_extract_scope_names(content)
     out_dir = os.path.dirname(output_path)
     out_paths = []
     for well_id in sorted(well_ids):
-        kept = [l for l in region if xml_get_attr_loose(l, 'well_id') == well_id]
+        site_id = well_sites.get(well_id, '')
+        kept = []
+        for l in region:
+            s = l.strip()
+            if 'execsql' in s and 'dp_template' in s.lower():
+                # 合并内容里的模板 UPDATE 是平台级的，单井文件按本井井槽名重新生成
+                continue
+            if s.startswith(SHARED_PREFIXES):
+                # DP_TEMPLATE / CD_SITE 等：只保留当前井所属平台的
+                if not s.startswith('<DP_TEMPLATE') and not s.startswith('<CD_SITE'):
+                    kept.append(l)
+                else:
+                    # DP_TEMPLATE / CD_SITE 都有 site_id，匹配当前井所在平台才保留
+                    sid = xml_get_attr_loose(l, 'site_id')
+                    if not site_id or sid == site_id:
+                        kept.append(l)
+                continue
+            # 有 well_id 的行才按井过滤
+            l_wid = xml_get_attr_loose(l, 'well_id')
+            if l_wid is None or l_wid == well_id:
+                kept.append(l)
         if not kept:
             continue
         well_name = names.get(well_id) or well_id
-        site_name = site_names.get(well_sites.get(well_id, ''), '')
+        site_name = site_names.get(site_id, '')
         name = xml_sanitize_filename(f'{site_name}-{well_name}' if site_name else well_name)
         out = os.path.join(out_dir, f'{name}.edm.xml')
+        # 本井井槽名命中的 DP_TEMPLATE 行下方追加 update 语句
+        well_kept = xml_add_dp_template_updates(kept)
+        # tail 里的 execsql 参数化为当前井
+        well_tail = xml_parameterize_single_well_execsql(tail, well_id)
         with open(out, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(head + kept + tail))
+            f.write('\n'.join(head + well_kept + well_tail))
         out_paths.append(out)
     return out_paths
 
 
 def xml_extract_recent_actual(filepath, cutoff, split=False):
     """提取实钻数据（现场实钻）：保留 ACTUAL 且 create_date 晚于 cutoff 的井，另存为新文件。
-    返回(删除行数, expandPoint替换次数, 清理行数, 保留井数, 输出文件路径, 单井文件列表,
-          保留井信息文本, 记录文件列表, 本次记录井数)"""
+    返回(删井行, expandPoint替换, 删整行, 删无效靶点, 删LINKTABLE后无效行,
+          保留井数, 输出路径, 单井文件列表, 井信息文本, 记录文件列表, 本次记录井数)"""
     with open(filepath, 'r', encoding='utf-8') as f:
         content = f.read()
+    # 处理前先改ID（全局ID + survey_tool_id属性值）
+    content = xml_replace_ids(content)
+    content = xml_replace_survey_tool_ids(content)
 
     well_ids = set(xml_extract_actual_survey_create_dates(content, cutoff))
     content, deleted, _removed = xml_remove_lines_not_in_well_ids(content, well_ids)
     content, cleaned = xml_remove_unwanted_lines(content)
     content, replaced = xml_replace_expand_point(content)
+
+    # 靶点处理：只保留被 CD_SURVEY_STATION 实际引用过的 target_id
+    valid_targets = xml_extract_project_target_ids(content)
+    content, targets_deleted = xml_remove_invalid_dp_project_target(content, valid_targets)
+    content, link_deleted = xml_remove_invalid_links_after_linktable(content, valid_targets)
+
+    # DP_TEMPLATE：被 CD_WELL.slot_name 匹配到的模板行下方追加 update 语句（同 7.1 合并口径）
+    content = '\n'.join(xml_add_dp_template_updates(content.split('\n')))
 
     base, ext = xml_split_edm_name(filepath)
     output_path = f'{base}_提取近期开钻井{ext or ".xml"}'
@@ -3817,7 +4110,8 @@ def xml_extract_recent_actual(filepath, cutoff, split=False):
     wells_info = xml_kept_wells_info(content, well_ids, cutoff) if well_ids else ''
     single_files = xml_split_single_well_files(output_path, content, well_ids) if split else []
     record_files, record_count = xml_update_spud_record(content, well_ids, cutoff) if well_ids else ([], 0)
-    return (deleted, replaced, cleaned, len(well_ids), output_path, single_files,
+    return (deleted, replaced, cleaned, targets_deleted, link_deleted,
+            len(well_ids), output_path, single_files,
             wells_info, record_files, record_count)
 
 
@@ -4023,7 +4317,7 @@ class XmlProcessTab(ttk.Frame):
 
     def __init__(self, master, controller=None):
         super().__init__(master)
-        self.var_mode = tk.StringVar(value='merge')
+        self.var_mode = tk.StringVar(value='extract')
         self.var_merge_folder = tk.StringVar()
         self.var_merge_prefix = tk.StringVar(value='全设计')
         self.var_extract_file = tk.StringVar()
@@ -4107,6 +4401,7 @@ class XmlProcessTab(ttk.Frame):
         self.var_db_project = tk.StringVar()
         self.var_db_site = tk.StringVar()
         self.var_db_summary = tk.StringVar(value='')
+        self._db_load_creds()
 
         self.frm_db = ttk.LabelFrame(outer, text=" ② 删除数据库非实钻设计井 ", padding=(10, 8))
         # 连接行（源: EDM轨迹导出工具 的连接界面）
@@ -4122,9 +4417,7 @@ class XmlProcessTab(ttk.Frame):
         # 已连接状态下切换数据库：自动用新库重连并重新加载油田
         self.cbo_db_name.bind('<<ComboboxSelected>>',
                               lambda _e: self._db_connect() if self._db_conn_str else None)
-        # 打开数据库下拉框时若尚未枚举，自动查询服务器上的数据库列表
-        self.cbo_db_name.bind('<ButtonRelease-1>', self._db_maybe_enum)
-        self.after(600, self._db_enum_silent)
+        # 打开标签页不做任何数据库查询，需用户点「连接数据库」后才访问 SQL
         ttk.Label(line, text="用户：").pack(side="left", padx=(8, 0))
         ttk.Entry(line, textvariable=self.var_db_user, width=6).pack(side="left")
         ttk.Label(line, text="密码：").pack(side="left", padx=(8, 0))
@@ -4248,35 +4541,6 @@ class XmlProcessTab(ttk.Frame):
         site_id = self._db_sites[sidx][0] if 0 < sidx < len(self._db_sites) else None
         return project_id, site_id
 
-    def _db_on_enum_done(self, databases):
-        """枚举数据库列表回调：仅填充下拉框，不打断当前输入"""
-        if not databases:
-            return
-        current = self.var_db_name.get().strip()
-        values = list(databases)
-        if current and current not in values:
-            values.append(current)
-        self.cbo_db_name['values'] = values
-
-    def _db_enum_silent(self):
-        """后台静默枚举服务器上的数据库（失败不弹窗，保持默认列表）"""
-        if not HAS_ODBC:
-            return
-        try:
-            conn_str = db_make_conn_str(
-                self.var_db_server.get().strip(), self.var_db_name.get().strip() or 'EDM',
-                self.var_db_user.get().strip(), self.var_db_pwd.get())
-        except Exception:
-            return
-        self._db_submit(work=lambda: db_list_databases(conn_str),
-                        on_done=self._db_on_enum_done,
-                        on_error=lambda _err: None)
-
-    def _db_maybe_enum(self, _event):
-        """点开数据库下拉框时，若列表只有默认项则补一次枚举"""
-        if len(self.cbo_db_name['values']) <= 1:
-            self._db_enum_silent()
-
     def _db_connect(self):
         if not HAS_ODBC:
             messagebox.showerror("缺少依赖", "请先安装 pyodbc：\npip install pyodbc", parent=self)
@@ -4315,12 +4579,56 @@ class XmlProcessTab(ttk.Frame):
         self.btn_db_delete.configure(state="disabled")
         self.var_db_conn.set(f'已连接（{len(projects)} 个油田）')
         self.var_status.set('连接成功，请选择油田')
+        self._db_save_creds()
 
     def _db_on_connect_error(self, e):
         self._db_conn_str = None
         self.var_db_conn.set('连接失败')
         self.var_status.set('数据库连接失败')
         messagebox.showerror("连接失败", f"数据库连接失败：\n{e}", parent=self)
+
+    def _db_creds_path(self):
+        """DB 参数持久化文件路径：~/.toolbox/db_creds.json"""
+        try:
+            home = os.path.expanduser('~')
+        except Exception:
+            home = os.path.dirname(os.path.abspath(__file__))
+        d = os.path.join(home, '.toolbox')
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'db_creds.json')
+
+    def _db_save_creds(self):
+        """把当前 DB 连接参数保存到本地（连接成功时调用）"""
+        try:
+            data = {
+                'server': self.var_db_server.get(),
+                'database': self.var_db_name.get(),
+                'user': self.var_db_user.get(),
+                'pwd': self.var_db_pwd.get(),
+            }
+            with open(self._db_creds_path(), 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _db_load_creds(self):
+        """启动时从本地恢复 DB 连接参数"""
+        try:
+            path = self._db_creds_path()
+            if not os.path.isfile(path):
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get('server'):
+                self.var_db_server.set(data['server'])
+            if data.get('database'):
+                self.var_db_name.set(data['database'])
+            if data.get('user'):
+                self.var_db_user.set(data['user'])
+            if data.get('pwd'):
+                self.var_db_pwd.set(data['pwd'])
+        except Exception:
+            pass
 
     def _db_on_project_selected(self, _event=None):
         project_id, _ = self._db_current_scope()
@@ -4520,7 +4828,8 @@ class XmlProcessTab(ttk.Frame):
         self.var_status.set("正在提取，请稍候…")
         self.update_idletasks()
         try:
-            (deleted, replaced, cleaned, kept_wells, output_path, single_files,
+            (deleted, replaced, cleaned, targets_deleted, link_deleted,
+             kept_wells, output_path, single_files,
              wells_info, record_files, record_count) = xml_extract_recent_actual(path, cutoff, split)
         except Exception as e:
             self.var_status.set("提取失败")
@@ -4528,7 +4837,9 @@ class XmlProcessTab(ttk.Frame):
             messagebox.showerror("错误", f"提取失败：\n{e}", parent=self)
             return
         self._log(f"新文件：{output_path}")
-        self._log(f"删除行：{deleted}；历史/链接清理：{cleaned} 行；expandPoint 替换：{replaced} 处；保留井：{kept_wells} 口")
+        self._log(f"删除行：{deleted}；历史/链接清理：{cleaned} 行；expandPoint 替换：{replaced} 处；"
+                  f"删无效靶点：{targets_deleted} 行；删 LINKTABLE 后无效行：{link_deleted} 行；"
+                  f"保留井：{kept_wells} 口")
         if single_files:
             self._log(f"单井文件：{len(single_files)} 个（同目录，按井名命名）")
         if wells_info:
@@ -4536,11 +4847,13 @@ class XmlProcessTab(ttk.Frame):
         if record_files:
             names = '、'.join(os.path.basename(p) for p in record_files)
             self._log(f"\n开钻记录已更新：{record_count} 口井写入 {names}（脚本目录，按年累计、井名去重）")
+
         self.var_status.set(f"提取完成：{os.path.basename(output_path)}")
         messagebox.showinfo(
             "完成", f"提取完成！\n\n新文件：{os.path.basename(output_path)}\n"
             f"保留井数：{kept_wells}\n删除行数：{deleted}\n"
-            f"历史/链接清理：{cleaned} 行\nexpandPoint 替换：{replaced} 处", parent=self)
+            f"历史/链接清理：{cleaned} 行\nexpandPoint 替换：{replaced} 处",
+            parent=self)
 
     def _run_remove(self):
         path = self.var_remove_file.get().strip()

@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "records": [
+    {
+      "油田名": "KL6-1",
+      "平台名": "KL6-1WHPA",
+      "平台id": "GVEeFjCkoL",
+      "槽口id": "ZAuvg",
+      "井名": "A16H(7#&#xFF0C;TD&#xFF09;",
+      "井槽名": "A16H(7#)",
+      "井id": "YtZrqDnkzn",
+      "wellbore_id": "QL1BnsF5rS",
+      "wellbore_name": "A16H",
+      "开钻日期": "2026-11-08",
+      "序号": 1,
+      "模板id": "s6q6x",
+      "平台槽口名": "A16H(7#)"
+    }
+  ]
+}

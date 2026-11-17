@@ -7,11 +7,13 @@
 
 用法：
     双击「一键打包成安装包.bat」（推荐）
-    或命令行： python build_installer.py [--no-clean] [--no-open]
+    或命令行： python build_installer.py [--no-clean] [--no-open] [--keep-dist]
 
 产物：
-    dist\\定向井设计工具箱\\定向井设计工具箱.exe      （绿色版，可直接运行）
     安装包输出\\定向井设计工具箱_v1.0_安装包.exe      （安装包，分发用这个）
+    （打包成功后自动删除 build\\、dist\\ 绿色版和 __pycache__，只留安装包）
+
+    如仍需绿色版，加 --keep-dist 保留 dist\\定向井设计工具箱\\
 """
 
 from __future__ import annotations
@@ -50,6 +52,7 @@ LOG_FILE = PROJECT / "打包日志.txt"
 ARGS = sys.argv[1:]
 DO_CLEAN = "--no-clean" not in ARGS
 DO_OPEN = "--no-open" not in ARGS
+KEEP_DIST = "--keep-dist" in ARGS
 
 
 # ----------------------------------------------------------------------
@@ -162,7 +165,7 @@ def remove_tree(path: Path, tries: int = 3):
 
 
 def step_clean() -> None:
-    rule("1/6  清理旧产物")
+    rule("1/7  清理旧产物")
     for d in (BUILD_DIR, DIST_DIR):
         if not d.exists():
             log(f"   {C['d']}跳过（不存在）: {d.name}{C['x']}")
@@ -187,7 +190,7 @@ def step_clean() -> None:
 # 环境检查
 # ----------------------------------------------------------------------
 def step_env() -> dict:
-    rule("0/6  环境检查")
+    rule("0/7  环境检查")
     problems = []
 
     if sys.version_info < (3, 9):
@@ -248,7 +251,7 @@ def step_env() -> dict:
 # 版本信息资源（让 exe 属性里显示名称/版本/公司）
 # ----------------------------------------------------------------------
 def step_version_info(defines: dict) -> None:
-    rule("2/6  生成版本信息")
+    rule("2/7  生成版本信息")
     ver = defines["MyAppVersion"]
     parts = [int(x) for x in re.findall(r"\d+", ver)][:4]
     while len(parts) < 4:
@@ -293,7 +296,7 @@ VSVersionInfo(
 # PyInstaller
 # ----------------------------------------------------------------------
 def step_pyinstaller(defines: dict) -> Path:
-    rule("3/6  PyInstaller 打包")
+    rule("3/7  PyInstaller 打包")
     log(f"   {C['d']}首次打包约 2~5 分钟，请耐心等待 ...{C['x']}")
     t0 = time.time()
     rc = run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
@@ -312,7 +315,7 @@ def step_pyinstaller(defines: dict) -> Path:
 
 
 def step_verify(exe: Path, defines: dict) -> None:
-    rule("4/6  校验打包结果")
+    rule("4/7  校验打包结果")
     if not exe.exists():
         log(f"   {C['r']}未找到 {exe}{C['x']}")
         sys.exit(4)
@@ -406,7 +409,7 @@ def install_iscc() -> Path | None:
 
 
 def step_inno(defines: dict) -> Path:
-    rule("5/6  生成安装包（Inno Setup）")
+    rule("5/7  生成安装包（Inno Setup）")
     iscc = find_iscc()
     if not iscc:
         iscc = install_iscc()
@@ -434,6 +437,30 @@ def step_inno(defines: dict) -> Path:
     return found[0]
 
 
+def step_purge(installer: Path) -> None:
+    """安装包生成后清理构建产物：删 build/、dist/（绿色版）和 __pycache__ 缓存，
+    只保留安装包和打包必需文件（spec / iss / 图标 / 语言文件 / 版本信息 / 日志）。"""
+    rule("6/7  清理缓存与绿色版")
+    for d in (BUILD_DIR, DIST_DIR):
+        if not d.exists():
+            log(f"   {C['d']}跳过（不存在）: {d.name}{C['x']}")
+            continue
+        err = remove_tree(d)
+        if err:
+            log(f"   {C['y']}无法删除 {d.name}\\：{err}（可手动删除）{C['x']}")
+        else:
+            log(f"   已删除 {d.name}\\")
+
+    n = 0
+    for p in PROJECT.rglob("__pycache__"):
+        if p.is_dir() and remove_tree(p) is None:
+            n += 1
+    if n:
+        log(f"   已删除 __pycache__ 缓存 {n} 处")
+
+    log(f"   保留 {installer.parent.name}\\{installer.name}")
+
+
 # ----------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------
@@ -454,17 +481,28 @@ def main() -> int:
     step_version_info(defines)
     exe = step_pyinstaller(defines)
     step_verify(exe, defines)
+    green_size = exe.stat().st_size
+    green_total = sum(f.stat().st_size for f in exe.parent.rglob("*") if f.is_file())
     installer = step_inno(defines)
 
+    if KEEP_DIST:
+        log("")
+        log("   已指定 --keep-dist，保留 dist/ 绿色版", "y")
+    else:
+        step_purge(installer)
+
     # ---------------- 汇总 ----------------
-    rule("6/6  完成")
+    rule("7/7  完成")
     log(f"{C['g']}✔ 打包成功{C['x']}")
     log("")
-    log(f"   绿色版  {exe}")
-    log(f"           {human(exe.stat().st_size)}（exe 本体），"
-        f"整个文件夹 {human(sum(f.stat().st_size for f in exe.parent.rglob('*') if f.is_file()))}")
+    if KEEP_DIST:
+        log(f"   绿色版  {exe}")
+        log(f"           {human(green_size)}（exe 本体），整个文件夹 {human(green_total)}")
     log(f"   安装包  {C['g']}{installer}{C['x']}")
     log(f"           {human(installer.stat().st_size)}")
+    if not KEEP_DIST:
+        log("")
+        log("   已清理 build\\、dist\\ 与 __pycache__，仅保留安装包。")
     log("")
     log(f"   安装包双击即可安装（默认装到 当前用户\\AppData\\Local\\Programs，无需管理员）。")
     log(f"   日志：{LOG_FILE.name}")
