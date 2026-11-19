@@ -100,27 +100,22 @@ def remove_unwanted_lines(content):
 
 
 def remove_invalid_links_after_linktable(content):
-    """删除<LINKTABLE>之后project_target_id无效的行"""
+    """清除 <LINKTABLE> 之后的全部内容，补回标准结尾（空 LINKTABLE + BINARY_DATA + </export>）"""
     lines = content.split('\n')
-    valid_ids = extract_project_target_ids(content)
-    
+
     # 找到<LINKTABLE>位置
     linktable_idx = next((i for i, line in enumerate(lines) if '<LINKTABLE>' in line.strip()), -1)
     if linktable_idx == -1:
         return content, 0
-    
-    # 过滤
-    kept = []
-    deleted = 0
-    for i, line in enumerate(lines):
-        if i > linktable_idx and 'project_target_id' in line:
-            target_id = extract_attribute(line, 'project_target_id')
-            if target_id and target_id not in valid_ids:
-                deleted += 1
-                continue
-        kept.append(line)
-    
-    return '\n'.join(kept), deleted
+
+    kept = lines[:linktable_idx + 1] + [
+        '</LINKTABLE>',
+        '<BINARY_DATA data_encoding="base64">',
+        '</BINARY_DATA>',
+        '</export>',
+    ]
+
+    return '\n'.join(kept), len(lines) - linktable_idx - 1
 
 
 def remove_specific_lines(content):

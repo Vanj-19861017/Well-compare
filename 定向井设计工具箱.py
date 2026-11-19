@@ -3364,7 +3364,7 @@ XML_SURVEY_TOOL_REPLACE_GROUPS = [
 XML_HEADER = (
     '<?xml version="1.0" standalone="no"?>',
     '<?DataServices DB_Major_Version=17;DB_Minor_Version=01;DB_Build_Version=000;'
-    'DB_Version=EDM 5000.17.1 (17.01.00.000);expandPoint=CD_WELL;?>',
+    'DB_Version=EDM 5000.17.1 (17.01.00.000);expandPoint=CD_SCENARIO;?>',
     '',
     '<export>',
     '<TOPLEVEL>',
@@ -3380,15 +3380,21 @@ XML_HEADER = (
     '</TOPLEVEL>',
 )
 
-# 兜底结尾（源文件没有 </ALWAYS-UPDATE> 结尾时使用）
+# 生成文件的统一结尾：清除 <LINKTABLE> 之后的全部内容，替换为下面四行
 XML_DEFAULT_ENDING = (
-    '</ALWAYS-UPDATE>',
-    '<LINKTABLE>',
     '</LINKTABLE>',
     '<BINARY_DATA data_encoding="base64">',
     '</BINARY_DATA>',
     '</export>',
 )
+
+
+def xml_align_default_ending(lines):
+    """统一收尾：清除 <LINKTABLE> 之后的全部内容，补回标准结尾"""
+    idx = next((i for i, l in enumerate(lines) if l.strip().startswith('<LINKTABLE>')), None)
+    if idx is None:
+        return list(lines)
+    return list(lines[:idx + 1]) + list(XML_DEFAULT_ENDING)
 
 
 def xml_replace_ids(content, groups=XML_REPLACE_GROUPS):
@@ -3415,28 +3421,6 @@ def xml_read_lines(path):
     content = xml_replace_ids(content)
     content = xml_replace_survey_tool_ids(content)
     return content.splitlines()
-
-
-def xml_split_ending(lines):
-    """结尾：</ALWAYS-UPDATE> 到文件末尾，LINKTABLE 内部链接行清空"""
-    start = None
-    for i, line in enumerate(lines):
-        if '</ALWAYS-UPDATE>' in line:
-            start = i
-            break
-    if start is None:
-        return None
-
-    ending, in_linktable = [], False
-    for line in lines[start:]:
-        stripped = line.strip()
-        if stripped.startswith('<LINKTABLE>'):
-            in_linktable = True
-        elif stripped.startswith('</LINKTABLE>'):
-            in_linktable = False
-        if not in_linktable or stripped.startswith(('<LINKTABLE>', '</LINKTABLE>')):
-            ending.append(line)
-    return ending
 
 
 def xml_collect_kept_lines(lines, seen):
@@ -3484,25 +3468,25 @@ def xml_collect_targets(lines):
     return [line for (_pid, tid), line in body_targets.items() if tid in valid_ids]
 
 
-def xml_build_always_update(target_lines):
-    """生成 <ALWAYS-UPDATE> 块：靶点行 + 每个靶点的 delete 语句"""
-    block = ['<ALWAYS-UPDATE>']
-    for line in target_lines:
-        block.append(line)
-        project_id = xml_get_attr(line, 'project_id')
-        target_id = xml_get_attr(line, 'project_target_id')
-        block.append(
-            '<execsql command="delete from DP_PROJECT_TARGET_POINT where '
-            f"project_id='{project_id}' and project_target_id='{target_id}'\"/>"
-        )
-    return block
+def _xml_attr(value):
+    """XML 属性值转义：SQL 里出现的 & < > 必须转成实体，否则整份 EDM XML 解析失败
+    （例如井槽名 'B53&B54H(12#' 中的 & 会被当成实体起始符）。"""
+    return (
+        str(value)
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
+    )
 
 
-def xml_add_dp_template_updates(lines):
-    """为每个被 CD_WELL.slot_name 匹配到的 DP_TEMPLATE 行，在其下方追加两条 update execsql：
-      1. 把 DB 里 short_name 已经是该井槽名的行改名为 '<井槽名>_old'（腾出槽位名）；
-      2. 把该模板行对应的 (site_id, template_id) 的 short_name / template_name 写成井槽名，
-         并把该模板行的 template_north / template_east 一并写入（行上没有该属性则不写）。
+def xml_add_dp_template_updates(lines, fix_coords=True):
+    """为每个被 CD_WELL.slot_name 匹配到的 DP_TEMPLATE 行，在其下方追加 update execsql：
+      1. 把 DB 里 short_name 已经是该井槽名的行改名为 '<井槽名>_old'（腾出槽位名，
+         但排除当前这条模板自身的 template_id）——无论是否勾选都执行；
+      2. 把 (site_id, template_id) 行的 short_name / template_name 写成井槽名；
+         勾选校正槽口坐标（fix_coords=True）时再追加该 DP_TEMPLATE 行自带的
+         template_north / template_east（原样使用，不做旋转）。
     匹配口径：同 site_id 下 DP_TEMPLATE.short_name（缺省回退 slot_name）== CD_WELL.slot_name。"""
     well_slots = set()
     for line in lines:
@@ -3525,24 +3509,29 @@ def xml_add_dp_template_updates(lines):
             xml_get_attr_loose(line, 'short_name') or xml_get_attr_loose(line, 'slot_name') or ''
         ).strip()
         if sid and tid and (sid, short_nm) in well_slots:
-            slot_sql = short_nm.replace("'", "''")
+            # 先做 SQL 字面量转义（' -> ''），再做 XML 属性转义（& < > "）
+            slot_sql = _xml_attr(short_nm.replace("'", "''"))
+            sid_sql = _xml_attr(sid.replace("'", "''"))
+            tid_sql = _xml_attr(tid.replace("'", "''"))
             if short_nm not in renamed:
                 renamed.add(short_nm)
                 out.append(
                     '<execsql command="update dp_template set '
                     f"short_name='{slot_sql}_old', template_name='{slot_sql}_old' "
-                    f"from dp_template where short_name='{slot_sql}'\"/>"
+                    f"from dp_template where short_name='{slot_sql}' "
+                    f"and template_id!='{tid_sql}'\"/>"
                 )
-            # SET 子句：井槽名 + 该模板行自带的 template_north / template_east（存在才写）
+            # 第二条：写井槽名；勾选校正槽口坐标时再用本行自带的 template_north / template_east
             sets = [f"short_name='{slot_sql}'", f"template_name='{slot_sql}'"]
-            for col in ('template_north', 'template_east'):
-                val = (xml_get_attr_loose(line, col) or '').strip()
-                if val:
-                    sets.append(f"{col}='{val.replace(chr(39), chr(39) * 2)}'")
+            if fix_coords:
+                for col in ('template_north', 'template_east'):
+                    val = xml_get_attr_loose(line, col)
+                    if val:
+                        sets.append(f"{col}='{val}'")
             out.append(
                 '<execsql command="update dp_template set '
                 + ', '.join(sets)
-                + f" from dp_template dp where dp.site_id='{sid}' and dp.template_id='{tid}'\"/>"
+                + f" from dp_template dp where dp.site_id='{sid_sql}' and dp.template_id='{tid_sql}'\"/>"
             )
     return out
 
@@ -3564,14 +3553,11 @@ def xml_merge_folder(folder, out_prefix='全设计'):
         raise ValueError('所选文件夹内没有 .edm.xml 文件')
 
     header = list(XML_HEADER)
-    ending = None
     kept, seen = [], set()
     target_lines, target_keys = [], set()
 
     for path in files:
         lines = xml_read_lines(path)
-        if ending is None:
-            ending = xml_split_ending(lines)
 
         kept.extend(xml_collect_kept_lines(lines, seen))
 
@@ -3583,18 +3569,13 @@ def xml_merge_folder(folder, out_prefix='全设计'):
                 target_keys.add(key)
                 target_lines.append(line)
 
-    if ending is None:
-        ending = list(XML_DEFAULT_ENDING)
-
     kept = xml_add_dp_template_updates(kept)
     output = list(header) + kept
-    if ending[0].strip().startswith('</ALWAYS-UPDATE>'):
-        output.append('<ALWAYS-UPDATE>')
-        output.extend(target_lines)
-        output.extend(ending)
-    else:
-        output.extend(xml_build_always_update(target_lines))
-        output.extend(ending)
+    output.append('<ALWAYS-UPDATE>')
+    output.extend(target_lines)
+    output.append('</ALWAYS-UPDATE>')
+    output.append('<LINKTABLE>')
+    output.extend(XML_DEFAULT_ENDING)
 
     out_name = f'{out_prefix}{datetime.date.today():%Y%m%d}.edm.xml'
     out_path = os.path.join(folder, out_name)
@@ -3685,10 +3666,9 @@ def xml_remove_unwanted_lines(content):
     return '\n'.join(kept), len(lines) - len(kept)
 
 
-def xml_replace_expand_point(content):
-    """把 expandPoint=CD_SITE 改成 expandPoint=CD_WELL，返回(新内容, 替换次数)"""
-    count = content.count('expandPoint=CD_SITE')
-    return content.replace('expandPoint=CD_SITE', 'expandPoint=CD_WELL'), count
+def xml_set_expand_point(content, name):
+    """把 <?DataServices ... expandPoint=XXX;?> 改成 name，返回(新内容, 替换次数)"""
+    return re.subn(r'expandPoint=[^;?]*', f'expandPoint={name}', content)
 
 
 def xml_extract_project_target_ids(content):
@@ -4020,7 +4000,7 @@ def _xml_set_attr(line, name, value):
     return line
 
 
-def xml_split_single_well_files(output_path, content, well_ids):
+def xml_split_single_well_files(output_path, content, well_ids, fix_coords=True):
     """把多井XML按井拆分为单井文件，文件名 = 平台名-well_common_name.edm.xml
     tail 里的 <ALWAYS-UPDATE> 块含平台级 execsql 删除语句，此处对每个井参数化注入 well_id，
     避免部署时误删同平台其他井的 POLYLINE / CHANGE_HISTORY / EXPLORER_FOLDER。"""
@@ -4070,16 +4050,18 @@ def xml_split_single_well_files(output_path, content, well_ids):
         name = xml_sanitize_filename(f'{site_name}-{well_name}' if site_name else well_name)
         out = os.path.join(out_dir, f'{name}.edm.xml')
         # 本井井槽名命中的 DP_TEMPLATE 行下方追加 update 语句
-        well_kept = xml_add_dp_template_updates(kept)
+        well_kept = xml_add_dp_template_updates(kept, fix_coords)
         # tail 里的 execsql 参数化为当前井
         well_tail = xml_parameterize_single_well_execsql(tail, well_id)
+        # 单井文件用 expandPoint=CD_WELL
+        single, _ = xml_set_expand_point('\n'.join(head + well_kept + well_tail), 'CD_WELL')
         with open(out, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(head + well_kept + well_tail))
+            f.write(single)
         out_paths.append(out)
     return out_paths
 
 
-def xml_extract_recent_actual(filepath, cutoff, split=False):
+def xml_extract_recent_actual(filepath, cutoff, split=False, fix_coords=True):
     """提取实钻数据（现场实钻）：保留 ACTUAL 且 create_date 晚于 cutoff 的井，另存为新文件。
     返回(删井行, expandPoint替换, 删整行, 删无效靶点, 删LINKTABLE后无效行,
           保留井数, 输出路径, 单井文件列表, 井信息文本, 记录文件列表, 本次记录井数)"""
@@ -4092,7 +4074,7 @@ def xml_extract_recent_actual(filepath, cutoff, split=False):
     well_ids = set(xml_extract_actual_survey_create_dates(content, cutoff))
     content, deleted, _removed = xml_remove_lines_not_in_well_ids(content, well_ids)
     content, cleaned = xml_remove_unwanted_lines(content)
-    content, replaced = xml_replace_expand_point(content)
+    content, replaced = xml_set_expand_point(content, 'CD_SCENARIO')
 
     # 靶点处理：只保留被 CD_SURVEY_STATION 实际引用过的 target_id
     valid_targets = xml_extract_project_target_ids(content)
@@ -4100,7 +4082,9 @@ def xml_extract_recent_actual(filepath, cutoff, split=False):
     content, link_deleted = xml_remove_invalid_links_after_linktable(content, valid_targets)
 
     # DP_TEMPLATE：被 CD_WELL.slot_name 匹配到的模板行下方追加 update 语句（同 7.1 合并口径）
-    content = '\n'.join(xml_add_dp_template_updates(content.split('\n')))
+    content = '\n'.join(xml_add_dp_template_updates(content.split('\n'), fix_coords))
+    # 统一收尾：清除 <LINKTABLE> 之后的全部内容，补回标准结尾
+    content = '\n'.join(xml_align_default_ending(content.split('\n')))
 
     base, ext = xml_split_edm_name(filepath)
     output_path = f'{base}_提取近期开钻井{ext or ".xml"}'
@@ -4108,7 +4092,7 @@ def xml_extract_recent_actual(filepath, cutoff, split=False):
         f.write(content)
 
     wells_info = xml_kept_wells_info(content, well_ids, cutoff) if well_ids else ''
-    single_files = xml_split_single_well_files(output_path, content, well_ids) if split else []
+    single_files = xml_split_single_well_files(output_path, content, well_ids, fix_coords) if split else []
     record_files, record_count = xml_update_spud_record(content, well_ids, cutoff) if well_ids else ([], 0)
     return (deleted, replaced, cleaned, targets_deleted, link_deleted,
             len(well_ids), output_path, single_files,
@@ -4324,6 +4308,7 @@ class XmlProcessTab(ttk.Frame):
         self.var_extract_date = tk.StringVar(
             value=(datetime.date.today() - datetime.timedelta(days=60)).isoformat())
         self.var_split = tk.BooleanVar(value=False)
+        self.var_fix_coords = tk.BooleanVar(value=False)
         self.var_remove_file = tk.StringVar()
         self.var_status = tk.StringVar(value='请选择上方功能并完成参数设置')
         self._build_ui()
@@ -4371,8 +4356,11 @@ class XmlProcessTab(ttk.Frame):
         ttk.Entry(line2, textvariable=self.var_extract_date, width=14).pack(side="left")
         ttk.Label(line2, text="（YYYY-MM-DD，create_date 晚于此日期的 ACTUAL 井才保留）",
                   foreground="#666666").pack(side="left", padx=(6, 0))
-        ttk.Checkbutton(self.frm_extract, text="生成单井 EDM 文件（按 well_id 拆分）",
-                        variable=self.var_split).pack(anchor="w", pady=(6, 0))
+        line3 = ttk.Frame(self.frm_extract); line3.pack(fill="x", pady=(6, 0))
+        ttk.Checkbutton(line3, text="生成单井 EDM 文件（按 well_id 拆分）",
+                        variable=self.var_split).pack(side="left")
+        ttk.Checkbutton(line3, text="校正槽口坐标（默认只校正槽口名）",
+                        variable=self.var_fix_coords).pack(side="left", padx=(24, 0))
         ttk.Button(self.frm_extract, text="开始提取", command=self._run_extract).pack(anchor="e", pady=(4, 0))
 
         self.frm_remove = ttk.LabelFrame(outer, text=" ② 删除非实钻井参数 ", padding=(10, 8))
@@ -4823,14 +4811,17 @@ class XmlProcessTab(ttk.Frame):
             messagebox.showwarning("参数错误", "日期格式应为 YYYY-MM-DD", parent=self)
             return
         split = self.var_split.get()
+        fix_coords = self.var_fix_coords.get()
         self._clear_log()
-        self._log(f"源文件：{path}\n筛选日期：{cutoff}（保留晚于该日的 ACTUAL 井）\n拆分单井：{split}\n")
+        self._log(f"源文件：{path}\n筛选日期：{cutoff}（保留晚于该日的 ACTUAL 井）\n"
+                  f"拆分单井：{split}\n校正槽口坐标：{fix_coords}\n")
         self.var_status.set("正在提取，请稍候…")
         self.update_idletasks()
         try:
             (deleted, replaced, cleaned, targets_deleted, link_deleted,
              kept_wells, output_path, single_files,
-             wells_info, record_files, record_count) = xml_extract_recent_actual(path, cutoff, split)
+             wells_info, record_files, record_count) = xml_extract_recent_actual(
+                path, cutoff, split, fix_coords)
         except Exception as e:
             self.var_status.set("提取失败")
             self._log(f"错误：{e}")

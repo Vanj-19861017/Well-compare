@@ -1,7 +1,7 @@
 
 ------------------------------------------------------------------
 定向井设计工具箱 · 一键打包
-2026-11-18 00:13:37   D:\python\Person\00-定向井设计工具箱
+2026-11-19 21:37:35   D:\python\Person\00-定向井设计工具箱
 
 ------------------------------------------------------------------
 
@@ -35,20 +35,20 @@
    首次打包约 2~5 分钟，请耐心等待 ...
 $ C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe -m PyInstaller --noconfirm --clean --log-level WARN D:\python\Person\00-定向井设计工具箱\定向井设计工具箱.spec
 $ C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe ...
-   116 INFO: PyInstaller: 6.19.0, contrib hooks: 2026.3
-   116 INFO: Python: 3.13.4
-   147 INFO: Platform: Windows-10-10.0.19045-SP0
-   147 INFO: Python environment: C:\Users\Administrator\AppData\Local\Programs\Python\Python313
-   285 WARNING: Failed to collect submodules for 'matplotlib.tests' because importing 'matplotlib.tests' raised: OSError: The baseline image directory does not exist. This is most likely because the test data is not installed. You may need to install matplotlib from source to get the test data.
-   43697 WARNING: hook-matplotlib.backends.qt_compat: selected 'PyQt5' as Qt bindings, but multiple bindings are available: ['PyQt5', 'PySide6']. Use the QT_API environment variable to select different bindings and suppress this warning.
-   47872 WARNING: Hidden import "scipy.special._cdflib" not found!
+   100 INFO: PyInstaller: 6.19.0, contrib hooks: 2026.3
+   100 INFO: Python: 3.13.4
+   121 INFO: Platform: Windows-10-10.0.19045-SP0
+   122 INFO: Python environment: C:\Users\Administrator\AppData\Local\Programs\Python\Python313
+   233 WARNING: Failed to collect submodules for 'matplotlib.tests' because importing 'matplotlib.tests' raised: OSError: The baseline image directory does not exist. This is most likely because the test data is not installed. You may need to install matplotlib from source to get the test data.
+   37316 WARNING: hook-matplotlib.backends.qt_compat: selected 'PyQt5' as Qt bindings, but multiple bindings are available: ['PyQt5', 'PySide6']. Use the QT_API environment variable to select different bindings and suppress this warning.
+   42413 WARNING: Hidden import "scipy.special._cdflib" not found!
    C:\Users\Administrator\AppData\Local\Programs\Python\Python313\Lib\site-packages\PyInstaller\building\build_main.py:227: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
      __import__(package)
    0.00s - Debugger warning: It seems that frozen modules are being used, which may
    0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
    0.00s - to python to disable frozen modules.
    0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
-   打包完成，用时 62 秒
+   打包完成，用时 59 秒
 
 ==================================================================
   4/7  校验打包结果
@@ -57,7 +57,7 @@ $ C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe ...
    OK  窗口图标
    OK  最优点模块
    OK  matplotlib 数据
-   绿色版总大小 189.4 MB（3230 个文件）
+   绿色版总大小 189.5 MB（3230 个文件）
 
 ==================================================================
   5/7  生成安装包（Inno Setup）
@@ -67,7 +67,7 @@ $ C:\Program Files (x86)\Inno Setup 6\ISCC.exe /Qp /DMyAppVersion=1.0 D:\python\
 $ C:\Program Files (x86)\Inno Setup 6\ISCC.exe ...
    
    Preprocessing
-   编译完成，用时 31 秒
+   编译完成，用时 29 秒
 
 ==================================================================
   6/7  清理缓存与绿色版
@@ -89,4 +89,4 @@ $ C:\Program Files (x86)\Inno Setup 6\ISCC.exe ...
 
    安装包双击即可安装（默认装到 当前用户\AppData\Local\Programs，无需管理员）。
    日志：打包日志.txt
-   总用时 95 秒
+   总用时 90 秒
